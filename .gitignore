@@ -1,0 +1,8 @@
+# Python
+backend/.venv/
+backend/__pycache__/
+backend/.env
+
+# Arduino
+firmware/gpt_glasses/.vscode/
+firmware/gpt_glasses/build/
