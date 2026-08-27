@@ -200,6 +200,11 @@ void captureAndSend() {
     client.stop();
     return;
   }
+  if (wav.dataSize > responseLength) {
+    Serial.println("WAV data length exceeds the HTTP response length.");
+    client.stop();
+    return;
+  }
   Serial.printf("Playing %u Hz, %u channel(s), %u bytes.\n", wav.sampleRate, wav.channels, wav.dataSize);
   if (!playWavStream(client, wav)) Serial.println("Audio playback failed.");
   client.stop();
@@ -296,13 +301,16 @@ bool playWavStream(WiFiClient& client, const WavInfo& wav) {
 
 bool readExact(WiFiClient& client, uint8_t* buffer, size_t length) {
   size_t offset = 0;
-  const uint32_t started = millis();
+  uint32_t lastActivity = millis();
   while (offset < length) {
     if (client.available()) {
       const int value = client.read();
-      if (value >= 0) buffer[offset++] = static_cast<uint8_t>(value);
+      if (value >= 0) {
+        buffer[offset++] = static_cast<uint8_t>(value);
+        lastActivity = millis();
+      }
     } else {
-      if (!client.connected() || millis() - started > 10000) return false;
+      if (!client.connected() || millis() - lastActivity > 10000) return false;
       delay(1);
     }
   }

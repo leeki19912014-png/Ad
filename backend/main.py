@@ -5,6 +5,7 @@ import os
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 from openai import OpenAI
 
@@ -51,12 +52,30 @@ async def read_image(image: UploadFile) -> bytes:
     if image.content_type not in ALLOWED_IMAGE_TYPES:
         raise HTTPException(status_code=400, detail="Unsupported image type.")
 
-    data = await image.read()
+    # Read one byte beyond the limit so an oversized upload is rejected without
+    # first allocating its whole body in application memory.
+    data = await image.read(MAX_IMAGE_SIZE + 1)
     if not data:
         raise HTTPException(status_code=400, detail="Empty image.")
     if len(data) > MAX_IMAGE_SIZE:
         raise HTTPException(status_code=413, detail="Image too large (maximum 5 MB).")
+    if not looks_like_image(data, image.content_type):
+        raise HTTPException(status_code=400, detail="Image data does not match its content type.")
     return data
+
+
+def looks_like_image(data: bytes, content_type: str) -> bool:
+    """Perform a cheap signature check before forwarding bytes to the model."""
+    signatures = {
+        "image/jpeg": (b"\xff\xd8\xff",),
+        "image/jpg": (b"\xff\xd8\xff",),
+        "image/png": (b"\x89PNG\r\n\x1a\n",),
+        "image/webp": (b"RIFF",),
+    }
+    if not data.startswith(signatures[content_type]):
+        return False
+    # A RIFF container must identify itself as WebP at byte offset 8.
+    return content_type != "image/webp" or len(data) >= 12 and data[8:12] == b"WEBP"
 
 
 def analyze_image(image_bytes: bytes, content_type: str) -> str:
@@ -102,16 +121,20 @@ def text_to_speech(text: str) -> bytes:
 @app.post("/api/analyze")
 async def analyze(image: UploadFile = File(...)) -> dict[str, object]:
     image_bytes = await read_image(image)
-    answer = analyze_image(image_bytes, image.content_type or "image/jpeg")
+    answer = await run_in_threadpool(
+        analyze_image, image_bytes, image.content_type or "image/jpeg"
+    )
     return {"success": True, "text": answer}
 
 
 @app.post("/api/analyze-and-speak")
 async def analyze_and_speak(image: UploadFile = File(...)) -> Response:
     image_bytes = await read_image(image)
-    answer = analyze_image(image_bytes, image.content_type or "image/jpeg")
+    answer = await run_in_threadpool(
+        analyze_image, image_bytes, image.content_type or "image/jpeg"
+    )
     print(f"[GPT] {answer}")
-    audio = text_to_speech(answer)
+    audio = await run_in_threadpool(text_to_speech, answer)
 
     # Response provides Content-Length, avoiding chunked transfer on the ESP32 V1 client.
     return Response(
@@ -119,7 +142,6 @@ async def analyze_and_speak(image: UploadFile = File(...)) -> Response:
         media_type="audio/wav",
         headers={
             "Content-Disposition": 'inline; filename="answer.wav"',
-            "X-GPT-Text": answer,
         },
     )
 
@@ -131,4 +153,5 @@ async def tts(text: str) -> Response:
         raise HTTPException(status_code=400, detail="Empty text.")
     if len(text) > 4096:
         raise HTTPException(status_code=400, detail="Text too long.")
-    return Response(content=text_to_speech(text), media_type="audio/wav")
+    audio = await run_in_threadpool(text_to_speech, text)
+    return Response(content=audio, media_type="audio/wav")
